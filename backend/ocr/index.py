@@ -1,14 +1,13 @@
 import os
-import json  # noqa
+import json
 import base64
-import subprocess
-import tempfile
+import urllib.request
 
 
 def handler(event: dict, context) -> dict:
     """
     OCR функция: принимает base64-изображение,
-    распознаёт текст через Tesseract OCR (rus+eng) и возвращает строки с размерами деталей
+    распознаёт текст через Yandex Vision OCR (рукопись + печать) и возвращает распознанный текст
     """
     if event.get('httpMethod') == 'OPTIONS':
         return {
@@ -33,31 +32,46 @@ def handler(event: dict, context) -> dict:
             'body': json.dumps({'error': 'Нужен image (base64)'}, ensure_ascii=False)
         }
 
-    # Извлекаем чистый base64
     if ',' in image_data:
         image_b64 = image_data.split(',', 1)[1]
     else:
         image_b64 = image_data
 
-    image_bytes = base64.b64decode(image_b64)
+    api_key = os.environ['YANDEX_VISION_API_KEY']
 
-    with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_img:
-        tmp_img.write(image_bytes)
-        tmp_img_path = tmp_img.name
+    payload = json.dumps({
+        "mimeType": "JPEG",
+        "languageCodes": ["ru", "en"],
+        "model": "handwritten",
+        "content": image_b64
+    }).encode('utf-8')
 
-    out_path = tmp_img_path.replace('.jpg', '_out')
-
-    subprocess.run(
-        ['tesseract', tmp_img_path, out_path, '-l', 'rus+eng', '--psm', '6'],
-        check=True,
-        capture_output=True
+    req = urllib.request.Request(
+        'https://ocr.api.cloud.yandex.net/ocr/v1/recognizeText',
+        data=payload,
+        headers={
+            'Content-Type': 'application/json',
+            'Authorization': f'Api-Key {api_key}',
+        },
+        method='POST'
     )
 
-    with open(out_path + '.txt', 'r', encoding='utf-8') as f:
-        text = f.read().strip()
+    with urllib.request.urlopen(req) as resp:
+        result = json.loads(resp.read().decode('utf-8'))
 
-    os.unlink(tmp_img_path)
-    os.unlink(out_path + '.txt')
+    blocks = result.get('result', {}).get('textAnnotation', {}).get('blocks', [])
+    lines_text = []
+    for block in blocks:
+        for line in block.get('lines', []):
+            line_str = ' '.join(
+                alt.get('text', '')
+                for word in line.get('words', [])
+                for alt in word.get('alternativeTexts', [word])[:1]
+            )
+            if line_str.strip():
+                lines_text.append(line_str.strip())
+
+    text = '\n'.join(lines_text)
 
     return {
         'statusCode': 200,
