@@ -10,77 +10,113 @@ interface DimEntry {
   qty: string;
 }
 
+interface LayoutSettings {
+  gapX: number;   // отступ по горизонтали мм
+  gapY: number;   // отступ по вертикали мм
+  cols: number;   // колонок в ряд (0 = авто)
+}
+
+interface CanvasRect {
+  x: number; y: number; w: number; h: number; num: number;
+  wOrig: number; hOrig: number; unitLabel: string;
+}
+
 const UNIT_LABELS: Record<Unit, string> = { mm: 'мм', cm: 'см', inch: 'дюймы', px: 'пиксели' };
 const UNIT_TO_MM: Record<Unit, number> = { mm: 1, cm: 10, inch: 25.4, px: 0.264583 };
 
 function parseAllDimensions(text: string): DimEntry[] {
   const results: DimEntry[] = [];
   const linePattern = /(\d+[.,]?\d*)\s*[xхXХ×]\s*(\d+[.,]?\d*)(?:\s*[-—–]?\s*(\d+)\s*(?:шт|pcs|pc|штук|штуки)?)?/gi;
-  let match;
-  let idx = 0;
+  let match, idx = 0;
   while ((match = linePattern.exec(text)) !== null) {
     results.push({ id: String(idx++), width: match[1].replace(',', '.'), height: match[2].replace(',', '.'), qty: match[3] || '1' });
   }
   return results;
 }
 
-function generateDXF(entries: DimEntry[], unit: Unit): string {
+function buildRects(entries: DimEntry[], unit: Unit, layout: LayoutSettings): CanvasRect[] {
   const factor = UNIT_TO_MM[unit];
+  // Разворачиваем все экземпляры
+  const all: { w: number; h: number; wOrig: number; hOrig: number }[] = [];
+  for (const e of entries) {
+    const w = parseFloat(e.width) * factor;
+    const h = parseFloat(e.height) * factor;
+    if (!w || !h) continue;
+    const qty = parseInt(e.qty) || 1;
+    for (let q = 0; q < qty; q++) all.push({ w, h, wOrig: parseFloat(e.width), hOrig: parseFloat(e.height) });
+  }
+  if (all.length === 0) return [];
+
+  const cols = layout.cols > 0 ? layout.cols : Math.ceil(Math.sqrt(all.length));
+  const rects: CanvasRect[] = [];
+
+  let col = 0, row = 0;
+  // Для каждой строки запоминаем maxH и offsetY
+  const rowHeights: number[] = [];
+  const rowOffsetY: number[] = [];
+  // Для каждой колонки в строке запоминаем offsetX
+  const colOffsets: number[] = [];
+
+  let curX = 0, curY = 0;
+  let rowMaxH = 0;
+
+  for (let i = 0; i < all.length; i++) {
+    const { w, h, wOrig, hOrig } = all[i];
+
+    if (col === 0) curX = 0;
+
+    rects.push({ x: curX, y: curY, w, h, num: i + 1, wOrig, hOrig, unitLabel: UNIT_LABELS[unit] });
+
+    rowMaxH = Math.max(rowMaxH, h);
+    curX += w + layout.gapX;
+    col++;
+
+    if (col >= cols) {
+      rowHeights[row] = rowMaxH;
+      rowOffsetY[row] = curY;
+      curY += rowMaxH + layout.gapY;
+      col = 0;
+      row++;
+      rowMaxH = 0;
+      colOffsets[row] = 0;
+    }
+  }
+
+  return rects;
+}
+
+function generateDXF(entries: DimEntry[], unit: Unit, layout: LayoutSettings): string {
+  const rects = buildRects(entries, unit, layout);
   const lines: string[] = [
     '0','SECTION','2','HEADER','9','$ACADVER','1','AC1015','9','$INSUNITS','70','4','0','ENDSEC',
     '0','SECTION','2','TABLES','0','TABLE','2','LAYER','70','1',
     '0','LAYER','2','0','70','0','62','7','6','CONTINUOUS','0','ENDTAB','0','ENDSEC',
     '0','SECTION','2','ENTITIES',
   ];
-  let offsetX = 0;
-  let globalNum = 1;
-  for (const entry of entries) {
-    const w = parseFloat(entry.width) * factor;
-    const h = parseFloat(entry.height) * factor;
-    const qty = parseInt(entry.qty) || 1;
-    if (!w || !h) continue;
-    for (let q = 0; q < qty; q++) {
-      const x0 = offsetX, y0 = 0, x1 = offsetX + w, y1 = h;
-      lines.push('0','LWPOLYLINE','8','0','90','4','70','1',
-        '10',`${x0}`,'20',`${y0}`,
-        '10',`${x1}`,'20',`${y0}`,
-        '10',`${x1}`,'20',`${y1}`,
-        '10',`${x0}`,'20',`${y1}`,
-      );
-      const cx = x0 + w / 2, cy = y0 + h / 2;
-      const ts = Math.min(w, h) * 0.06;
-      lines.push('0','TEXT','8','0','10',`${cx}`,'20',`${cy + ts * 0.6}`,'40',`${ts}`,'1',`#${globalNum} ${w.toFixed(0)}×${h.toFixed(0)}mm`,'72','1','11',`${cx}`,'21',`${cy + ts * 0.6}`);
-      lines.push('0','TEXT','8','0','10',`${cx}`,'20',`${cy - ts * 0.6}`,'40',`${ts * 0.8}`,'1',`${q + 1}/${qty} шт`,'72','1','11',`${cx}`,'21',`${cy - ts * 0.6}`);
-      offsetX += w + 20;
-      globalNum++;
-    }
+
+  for (const r of rects) {
+    lines.push('0','LWPOLYLINE','8','0','90','4','70','1',
+      '10',`${r.x}`,'20',`${r.y}`,
+      '10',`${r.x + r.w}`,'20',`${r.y}`,
+      '10',`${r.x + r.w}`,'20',`${r.y + r.h}`,
+      '10',`${r.x}`,'20',`${r.y + r.h}`,
+    );
+    const cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    const ts = Math.min(r.w, r.h) * 0.06;
+    lines.push('0','TEXT','8','0','10',`${cx}`,'20',`${cy + ts * 0.6}`,'40',`${ts}`,'1',`#${r.num} ${r.wOrig}×${r.hOrig}${r.unitLabel}`,'72','1','11',`${cx}`,'21',`${cy + ts * 0.6}`);
   }
+
   lines.push('0','ENDSEC','0','EOF');
   return lines.join('\n');
 }
 
-interface CanvasRect { x: number; y: number; w: number; h: number; label: string; num: number; }
+const COLORS = [
+  'hsl(195,100%,55%)', 'hsl(160,80%,50%)', 'hsl(45,100%,60%)',
+  'hsl(280,70%,65%)', 'hsl(20,100%,60%)', 'hsl(340,80%,60%)',
+  'hsl(60,90%,55%)', 'hsl(200,80%,60%)',
+];
 
-function buildRects(entries: DimEntry[], unit: Unit): CanvasRect[] {
-  const factor = UNIT_TO_MM[unit];
-  const rects: CanvasRect[] = [];
-  let offsetX = 0;
-  let globalNum = 1;
-  for (const entry of entries) {
-    const w = parseFloat(entry.width) * factor;
-    const h = parseFloat(entry.height) * factor;
-    const qty = parseInt(entry.qty) || 1;
-    if (!w || !h) continue;
-    for (let q = 0; q < qty; q++) {
-      rects.push({ x: offsetX, y: 0, w, h, label: `#${globalNum}  ${entry.width}×${entry.height} ${UNIT_LABELS[unit]}`, num: globalNum });
-      offsetX += w + 20;
-      globalNum++;
-    }
-  }
-  return rects;
-}
-
-function DXFCanvas({ entries, unit }: { entries: DimEntry[]; unit: Unit }) {
+function DXFCanvas({ entries, unit, layout }: { entries: DimEntry[]; unit: Unit; layout: LayoutSettings }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -89,111 +125,142 @@ function DXFCanvas({ entries, unit }: { entries: DimEntry[]; unit: Unit }) {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const rects = buildRects(entries, unit);
+    const rects = buildRects(entries, unit, layout);
     if (rects.length === 0) {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      canvas.width = canvas.offsetWidth || 800;
+      canvas.height = 200;
+      ctx.fillStyle = 'hsl(220,16%,8%)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
       return;
     }
 
     const totalW = rects.reduce((m, r) => Math.max(m, r.x + r.w), 0);
     const totalH = rects.reduce((m, r) => Math.max(m, r.y + r.h), 0);
 
-    const PAD = 40;
+    const PAD = 48;
     const cw = canvas.offsetWidth || 800;
+    const maxCanvasH = Math.max(300, window.innerHeight * 0.38);
     const scaleX = (cw - PAD * 2) / totalW;
-    const scaleY = (canvas.offsetHeight - PAD * 2) / totalH;
-    const scale = Math.min(scaleX, scaleY, 2);
+    const scaleY = (maxCanvasH - PAD * 2) / totalH;
+    const scale = Math.min(scaleX, scaleY, 3);
 
     canvas.width = cw;
-    canvas.height = Math.max(200, totalH * scale + PAD * 2);
+    canvas.height = Math.max(220, totalH * scale + PAD * 2);
 
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    // background
     ctx.fillStyle = 'hsl(220,16%,8%)';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // grid
-    ctx.strokeStyle = 'hsl(195,100%,50%,0.05)';
+    // Grid
+    ctx.strokeStyle = 'rgba(0,220,255,0.04)';
     ctx.lineWidth = 0.5;
-    const gridStep = 50 * scale;
-    for (let x = PAD; x < canvas.width; x += gridStep) {
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
-    }
-    for (let y = PAD; y < canvas.height; y += gridStep) {
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
-    }
+    const gridStep = Math.max(20, 50 * scale);
+    for (let x = PAD; x < canvas.width; x += gridStep) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke(); }
+    for (let y = PAD; y < canvas.height; y += gridStep) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke(); }
 
-    const colors = [
-      'hsl(195,100%,55%)', 'hsl(160,80%,50%)', 'hsl(45,100%,60%)',
-      'hsl(280,70%,65%)', 'hsl(20,100%,60%)', 'hsl(340,80%,60%)',
-    ];
+    // Origin cross
+    ctx.strokeStyle = 'rgba(0,220,255,0.15)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(PAD, 0); ctx.lineTo(PAD, canvas.height); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, PAD); ctx.lineTo(canvas.width, PAD); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Dimension lines between rects (gap indicators)
+    if (layout.gapX > 0 || layout.gapY > 0) {
+      ctx.strokeStyle = 'rgba(0,220,255,0.12)';
+      ctx.lineWidth = 0.5;
+      ctx.setLineDash([2, 3]);
+      for (let i = 0; i < rects.length - 1; i++) {
+        const a = rects[i], b = rects[i + 1];
+        if (Math.abs(a.y - b.y) < 1) {
+          const x1s = PAD + (a.x + a.w) * scale;
+          const x2s = PAD + b.x * scale;
+          const ym = PAD + (a.y + a.h / 2) * scale;
+          ctx.beginPath(); ctx.moveTo(x1s, ym); ctx.lineTo(x2s, ym); ctx.stroke();
+        }
+      }
+      ctx.setLineDash([]);
+    }
 
     for (const rect of rects) {
       const sx = PAD + rect.x * scale;
       const sy = PAD + rect.y * scale;
       const sw = rect.w * scale;
       const sh = rect.h * scale;
-      const color = colors[(rect.num - 1) % colors.length];
+      const color = COLORS[(rect.num - 1) % COLORS.length];
 
-      // fill
-      ctx.fillStyle = color.replace(')', ',0.06)').replace('hsl(', 'hsla(');
+      // Fill
+      ctx.fillStyle = color.replace('hsl(', 'hsla(').replace(')', ',0.07)');
       ctx.fillRect(sx, sy, sw, sh);
 
-      // border
+      // Border
       ctx.strokeStyle = color;
       ctx.lineWidth = 1.5;
       ctx.strokeRect(sx, sy, sw, sh);
 
-      // corner ticks
-      const tick = Math.min(8, sw * 0.08, sh * 0.08);
+      // Corner ticks
+      const tick = Math.max(4, Math.min(10, sw * 0.07, sh * 0.07));
       ctx.lineWidth = 2;
-      [[sx, sy], [sx + sw, sy], [sx, sy + sh], [sx + sw, sy + sh]].forEach(([cx2, cy2], i) => {
-        const dx = i % 2 === 0 ? 1 : -1;
-        const dy = i < 2 ? 1 : -1;
+      [[sx, sy, 1, 1], [sx+sw, sy, -1, 1], [sx, sy+sh, 1, -1], [sx+sw, sy+sh, -1, -1]].forEach(([cx2, cy2, dx, dy]) => {
         ctx.beginPath();
         ctx.moveTo(cx2 + dx * tick, cy2); ctx.lineTo(cx2, cy2); ctx.lineTo(cx2, cy2 + dy * tick);
         ctx.stroke();
       });
 
-      // label
+      // Width dimension line (top)
+      if (sh > 30) {
+        ctx.strokeStyle = color.replace('hsl(', 'hsla(').replace(')', ',0.35)');
+        ctx.lineWidth = 0.8;
+        const arrowY = sy - 8;
+        ctx.beginPath(); ctx.moveTo(sx + 4, arrowY); ctx.lineTo(sx + sw - 4, arrowY); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(sx, arrowY - 3); ctx.lineTo(sx, arrowY + 3); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(sx + sw, arrowY - 3); ctx.lineTo(sx + sw, arrowY + 3); ctx.stroke();
+      }
+
+      // Label
       const cx2 = sx + sw / 2;
       const cy2 = sy + sh / 2;
-      const fontSize = Math.max(9, Math.min(14, sw * 0.08, sh * 0.2));
-      ctx.fillStyle = color;
-      ctx.font = `600 ${fontSize}px "IBM Plex Mono", monospace`;
+      const fontSize = Math.max(8, Math.min(13, sw * 0.1, sh * 0.22));
+
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
 
-      if (sw > 40 && sh > 24) {
-        ctx.fillText(`#${rect.num}`, cx2, cy2 - fontSize * 0.7);
-        ctx.font = `400 ${fontSize * 0.85}px "IBM Plex Mono", monospace`;
-        ctx.fillStyle = color.replace(')', ',0.8)').replace('hsl(', 'hsla(');
-        const dimLabel = `${rect.w.toFixed(0)}×${rect.h.toFixed(0)}`;
-        ctx.fillText(dimLabel, cx2, cy2 + fontSize * 0.5);
-      } else {
-        ctx.fillText(`#${rect.num}`, cx2, cy2);
+      if (sw > 30 && sh > 20) {
+        // num
+        ctx.fillStyle = color;
+        ctx.font = `700 ${fontSize}px "IBM Plex Mono", monospace`;
+        ctx.fillText(`#${rect.num}`, cx2, sh > 40 ? cy2 - fontSize * 0.8 : cy2);
+
+        // dims
+        if (sh > 40 && sw > 50) {
+          ctx.font = `400 ${fontSize * 0.82}px "IBM Plex Mono", monospace`;
+          ctx.fillStyle = color.replace('hsl(', 'hsla(').replace(')', ',0.75)');
+          ctx.fillText(`${rect.wOrig}×${rect.hOrig}`, cx2, cy2 + fontSize * 0.5);
+        }
+
+        // top dimension label
+        if (sh > 30) {
+          ctx.font = `400 ${Math.max(7, fontSize * 0.75)}px "IBM Plex Mono", monospace`;
+          ctx.fillStyle = color.replace('hsl(', 'hsla(').replace(')', ',0.5)');
+          ctx.fillText(`${rect.w.toFixed(0)}mm`, cx2, sy - 12);
+        }
       }
     }
 
-    // axis labels
-    ctx.fillStyle = 'hsl(195,100%,50%,0.3)';
-    ctx.font = '10px "IBM Plex Mono", monospace';
+    // Origin label
+    ctx.fillStyle = 'rgba(0,220,255,0.25)';
+    ctx.font = '9px "IBM Plex Mono", monospace';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
-    ctx.fillText(`0`, PAD - 12, PAD - 14);
-  }, [entries, unit]);
+    ctx.fillText('0,0', PAD + 3, PAD + 3);
 
-  return (
-    <canvas
-      ref={canvasRef}
-      style={{ width: '100%', display: 'block', minHeight: 200 }}
-    />
-  );
+  }, [entries, unit, layout]);
+
+  return <canvas ref={canvasRef} style={{ width: '100%', display: 'block' }} />;
 }
 
 export default function Index() {
-  const [step, setStep] = useState<1 | 2 | 3>(1);
+  const [step, setStep] = useState<1 | 2>(1);
   const [isDragging, setIsDragging] = useState(false);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [rawText, setRawText] = useState('');
@@ -202,6 +269,7 @@ export default function Index() {
   const [unit, setUnit] = useState<Unit>('mm');
   const [dxfContent, setDxfContent] = useState('');
   const [activeEntry, setActiveEntry] = useState<string | null>(null);
+  const [layout, setLayout] = useState<LayoutSettings>({ gapX: 10, gapY: 10, cols: 0 });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef2 = useRef<HTMLInputElement>(null);
 
@@ -242,9 +310,8 @@ export default function Index() {
     if (file) handleFile(file);
   };
 
-  const updateEntry = (id: string, field: keyof DimEntry, value: string) => {
+  const updateEntry = (id: string, field: keyof DimEntry, value: string) =>
     setEntries(prev => prev.map(e => e.id === id ? { ...e, [field]: value } : e));
-  };
 
   const addEntry = () => {
     const newId = String(Date.now());
@@ -252,30 +319,20 @@ export default function Index() {
     setActiveEntry(newId);
   };
 
-  const removeEntry = (id: string) => {
-    setEntries(prev => {
-      const next = prev.filter(e => e.id !== id);
-      return next.length > 0 ? next : [{ id: '0', width: '', height: '', qty: '1' }];
-    });
-  };
+  const removeEntry = (id: string) =>
+    setEntries(prev => { const n = prev.filter(e => e.id !== id); return n.length > 0 ? n : [{ id: '0', width: '', height: '', qty: '1' }]; });
 
   const validEntries = entries.filter(e => parseFloat(e.width) > 0 && parseFloat(e.height) > 0);
-
-  // Подсчёт площади
+  const totalPieces = validEntries.reduce((s, e) => s + (parseInt(e.qty) || 1), 0);
   const totalAreaMm2 = validEntries.reduce((sum, e) => {
     const w = parseFloat(e.width) * UNIT_TO_MM[unit];
     const h = parseFloat(e.height) * UNIT_TO_MM[unit];
-    const qty = parseInt(e.qty) || 1;
-    return sum + w * h * qty;
+    return sum + w * h * (parseInt(e.qty) || 1);
   }, 0);
-  const totalAreaM2 = totalAreaMm2 / 1_000_000;
-  const totalPieces = validEntries.reduce((s, e) => s + (parseInt(e.qty) || 1), 0);
 
-  const handleGenerateAndPreview = () => {
-    if (validEntries.length === 0) return;
-    const dxf = generateDXF(validEntries, unit);
-    setDxfContent(dxf);
-  };
+  useEffect(() => {
+    if (validEntries.length > 0) setDxfContent(generateDXF(validEntries, unit, layout));
+  }, [entries, unit, layout]);
 
   const handleDownload = () => {
     if (!dxfContent) return;
@@ -288,25 +345,11 @@ export default function Index() {
     URL.revokeObjectURL(url);
   };
 
-  const handleReset = () => {
-    setStep(1);
-    setImagePreview(null);
-    setRawText('');
-    setEntries([]);
-    setDxfContent('');
-    setActiveEntry(null);
-  };
-
-  // Автообновление превью при изменении entries/unit
-  useEffect(() => {
-    if (validEntries.length > 0) {
-      const dxf = generateDXF(validEntries, unit);
-      setDxfContent(dxf);
-    }
-  }, [entries, unit]);
+  const setGap = (axis: 'gapX' | 'gapY', val: string) => setLayout(l => ({ ...l, [axis]: Math.max(0, parseFloat(val) || 0) }));
+  const setCols = (val: string) => setLayout(l => ({ ...l, cols: Math.max(0, parseInt(val) || 0) }));
 
   return (
-    <div className="min-h-screen bg-background grid-bg flex flex-col">
+    <div className="min-h-screen bg-background grid-bg flex flex-col" style={{ height: '100vh', overflow: 'hidden' }}>
       {/* Header */}
       <header className="border-b border-border/50 px-6 py-3 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-3">
@@ -315,214 +358,254 @@ export default function Index() {
           </div>
           <span className="font-mono text-sm text-primary tracking-widest uppercase glow-text">DXF Generator</span>
         </div>
-        <div className="flex items-center gap-5">
-          {([1, 2] as const).map((s) => (
-            <div key={s} className="flex items-center gap-2">
-              <div className={`w-5 h-5 border font-mono text-xs flex items-center justify-center transition-all duration-300 ${step >= s ? 'border-primary bg-primary/10 text-primary' : 'border-border/40 text-muted-foreground'}`}>
-                {step > s ? '✓' : s}
-              </div>
-              <span className={`text-xs font-mono hidden sm:block transition-colors ${step >= s ? 'text-primary/80' : 'text-muted-foreground/40'}`}>
-                {s === 1 ? 'ЗАГРУЗКА' : 'РЕДАКТОР'}
-              </span>
-            </div>
-          ))}
-        </div>
-      </header>
-
-      <main className="flex-1 flex items-start justify-center p-4 overflow-hidden">
-
-        {/* STEP 1 */}
-        {step === 1 && (
-          <div className="w-full max-w-lg mt-16 animate-fade-in">
-            <div className="mb-8 text-center">
-              <h1 className="font-mono text-2xl text-foreground mb-2 tracking-tight">Загрузите изображение</h1>
-              <p className="text-muted-foreground text-sm">Фото с размерами, рукописный текст или накладная — распознаю все позиции автоматически</p>
-            </div>
-            <div
-              className={`relative border-2 border-dashed p-14 text-center cursor-crosshair transition-all duration-300 ${isDragging ? 'border-primary bg-primary/5 glow' : 'border-border/40 hover:border-primary/40 hover:bg-muted/20'}`}
-              onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-              onDragLeave={() => setIsDragging(false)}
-              onDrop={onDrop}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <input ref={fileInputRef} type="file" accept="image/*" className="hidden"
-                onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])} />
-              <div className="flex flex-col items-center gap-4">
-                <div className={`w-16 h-16 border border-primary/30 flex items-center justify-center transition-all duration-300 ${isDragging ? 'border-primary scale-110' : ''}`}>
-                  <Icon name="Upload" size={28} className="text-primary/60" />
-                </div>
-                <div>
-                  <p className="font-mono text-sm text-foreground/80 mb-1">{isDragging ? 'ОТПУСТИТЕ' : 'ПЕРЕТАЩИТЕ ИЛИ НАЖМИТЕ'}</p>
-                  <p className="text-xs text-muted-foreground font-mono">PNG · JPG · WEBP · BMP</p>
-                </div>
-              </div>
-              <div className="absolute top-2 left-2 w-4 h-4 border-t-2 border-l-2 border-primary/30" />
-              <div className="absolute top-2 right-2 w-4 h-4 border-t-2 border-r-2 border-primary/30" />
-              <div className="absolute bottom-2 left-2 w-4 h-4 border-b-2 border-l-2 border-primary/30" />
-              <div className="absolute bottom-2 right-2 w-4 h-4 border-b-2 border-r-2 border-primary/30" />
-            </div>
-            <div className="mt-4 flex items-center gap-3">
-              <div className="flex-1 h-px bg-border/30" />
-              <span className="font-mono text-xs text-muted-foreground/50">или без изображения</span>
-              <div className="flex-1 h-px bg-border/30" />
-            </div>
-            <button onClick={() => { setEntries([{ id: '0', width: '', height: '', qty: '1' }]); setStep(2); }}
-              className="mt-4 w-full py-3 border border-border/40 text-muted-foreground hover:border-primary/40 hover:text-foreground font-mono text-xs tracking-widest transition-all duration-200">
-              ВВЕСТИ РАЗМЕРЫ ВРУЧНУЮ →
+        {step === 2 && validEntries.length > 0 && (
+          <div className="flex items-center gap-4">
+            <span className="font-mono text-xs text-muted-foreground/60">
+              {validEntries.length} поз · {totalPieces} рамок · {(totalAreaMm2 / 1_000_000).toFixed(4)} м²
+            </span>
+            <button onClick={handleDownload} disabled={!dxfContent}
+              className="flex items-center gap-2 px-4 py-1.5 bg-primary text-primary-foreground font-mono text-xs tracking-widest hover:bg-primary/90 transition-all disabled:opacity-30 glow">
+              <Icon name="Download" size={13} />
+              СКАЧАТЬ DXF
             </button>
           </div>
         )}
+      </header>
 
-        {/* STEP 2 — full page editor */}
+      <main className="flex-1 overflow-hidden flex flex-col">
+
+        {/* STEP 1 */}
+        {step === 1 && (
+          <div className="flex-1 flex items-center justify-center p-4 animate-fade-in">
+            <div className="w-full max-w-lg">
+              <div className="mb-8 text-center">
+                <h1 className="font-mono text-2xl text-foreground mb-2 tracking-tight">Загрузите изображение</h1>
+                <p className="text-muted-foreground text-sm">Фото с размерами, рукописный текст — распознаю все позиции автоматически</p>
+              </div>
+              <div
+                className={`relative border-2 border-dashed p-14 text-center cursor-crosshair transition-all duration-300 ${isDragging ? 'border-primary bg-primary/5 glow' : 'border-border/40 hover:border-primary/40 hover:bg-muted/20'}`}
+                onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={onDrop}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <input ref={fileInputRef} type="file" accept="image/*" className="hidden"
+                  onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])} />
+                <div className="flex flex-col items-center gap-4">
+                  <div className={`w-16 h-16 border border-primary/30 flex items-center justify-center transition-all duration-300 ${isDragging ? 'border-primary scale-110' : ''}`}>
+                    <Icon name="Upload" size={28} className="text-primary/60" />
+                  </div>
+                  <div>
+                    <p className="font-mono text-sm text-foreground/80 mb-1">{isDragging ? 'ОТПУСТИТЕ' : 'ПЕРЕТАЩИТЕ ИЛИ НАЖМИТЕ'}</p>
+                    <p className="text-xs text-muted-foreground font-mono">PNG · JPG · WEBP · BMP</p>
+                  </div>
+                </div>
+                <div className="absolute top-2 left-2 w-4 h-4 border-t-2 border-l-2 border-primary/30" />
+                <div className="absolute top-2 right-2 w-4 h-4 border-t-2 border-r-2 border-primary/30" />
+                <div className="absolute bottom-2 left-2 w-4 h-4 border-b-2 border-l-2 border-primary/30" />
+                <div className="absolute bottom-2 right-2 w-4 h-4 border-b-2 border-r-2 border-primary/30" />
+              </div>
+              <div className="mt-4 flex items-center gap-3">
+                <div className="flex-1 h-px bg-border/30" />
+                <span className="font-mono text-xs text-muted-foreground/50">или без изображения</span>
+                <div className="flex-1 h-px bg-border/30" />
+              </div>
+              <button onClick={() => { setEntries([{ id: '0', width: '', height: '', qty: '1' }]); setStep(2); }}
+                className="mt-4 w-full py-3 border border-border/40 text-muted-foreground hover:border-primary/40 hover:text-foreground font-mono text-xs tracking-widest transition-all">
+                ВВЕСТИ РАЗМЕРЫ ВРУЧНУЮ →
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* STEP 2 */}
         {step === 2 && (
-          <div className="w-full animate-fade-in flex flex-col gap-4" style={{ height: 'calc(100vh - 64px)' }}>
+          <div className="flex-1 overflow-hidden flex flex-col animate-fade-in">
 
-            {/* Top: 3 columns */}
-            <div className="grid gap-4 shrink-0" style={{ gridTemplateColumns: '1fr 1.1fr 1fr', height: 360 }}>
+            {/* Top row: 3 panels */}
+            <div className="grid shrink-0 gap-3 p-3 pb-0" style={{ gridTemplateColumns: '1fr 1.1fr 0.9fr', height: 340 }}>
 
-              {/* COL 1: Image */}
+              {/* Panel 1: Image */}
               <div className="border border-border/40 flex flex-col overflow-hidden">
-                <div className="px-3 py-2 border-b border-border/30 flex items-center justify-between shrink-0">
-                  <span className="font-mono text-xs text-muted-foreground tracking-wider">ИЗОБРАЖЕНИЕ</span>
-                  {imagePreview && (
-                    <button onClick={() => fileInputRef2.current?.click()} className="font-mono text-xs text-primary/60 hover:text-primary transition-colors">ЗАМЕНИТЬ</button>
-                  )}
+                <div className="px-3 py-1.5 border-b border-border/30 flex items-center justify-between shrink-0">
+                  <span className="font-mono text-xs text-muted-foreground/70 tracking-wider">ИЗОБРАЖЕНИЕ</span>
+                  <button onClick={() => fileInputRef2.current?.click()} className="font-mono text-xs text-primary/50 hover:text-primary transition-colors">
+                    {imagePreview ? 'ЗАМЕНИТЬ' : 'ЗАГРУЗИТЬ'}
+                  </button>
                   <input ref={fileInputRef2} type="file" accept="image/*" className="hidden"
                     onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])} />
                 </div>
                 <div className="flex-1 overflow-auto p-2">
-                  {imagePreview ? (
-                    <img src={imagePreview} alt="Источник" className="w-full h-auto object-contain" />
-                  ) : (
-                    <div className="h-full flex flex-col items-center justify-center gap-2 cursor-pointer"
-                      onClick={() => fileInputRef2.current?.click()}>
-                      <Icon name="Image" size={28} className="text-muted-foreground/25" />
-                      <span className="font-mono text-xs text-muted-foreground/30">НЕТ ИЗОБРАЖЕНИЯ</span>
-                    </div>
-                  )}
+                  {imagePreview
+                    ? <img src={imagePreview} alt="Источник" className="w-full h-auto object-contain" />
+                    : <div className="h-full flex flex-col items-center justify-center gap-2 cursor-pointer opacity-30" onClick={() => fileInputRef2.current?.click()}>
+                        <Icon name="Image" size={24} className="text-muted-foreground" />
+                        <span className="font-mono text-xs text-muted-foreground">НЕТ ИЗОБРАЖЕНИЯ</span>
+                      </div>
+                  }
                 </div>
                 {rawText && (
-                  <div className="border-t border-border/30 px-3 py-2 max-h-20 overflow-auto shrink-0">
-                    <p className="font-mono text-xs text-foreground/40 whitespace-pre-wrap leading-relaxed">{rawText}</p>
+                  <div className="border-t border-border/25 px-2 py-1.5 max-h-16 overflow-auto shrink-0">
+                    <p className="font-mono text-xs text-foreground/35 whitespace-pre-wrap leading-relaxed">{rawText}</p>
                   </div>
                 )}
               </div>
 
-              {/* COL 2: Entries list */}
+              {/* Panel 2: Entries */}
               <div className="border border-border/40 flex flex-col overflow-hidden">
-                <div className="px-3 py-2 border-b border-border/30 flex items-center justify-between shrink-0">
-                  <span className="font-mono text-xs text-muted-foreground tracking-wider">
-                    ПОЗИЦИИ {isRecognizing ? <span className="text-primary animate-pulse ml-2">РАСПОЗНАЮ...</span> : null}
-                  </span>
+                <div className="px-3 py-1.5 border-b border-border/30 flex items-center justify-between shrink-0">
                   <div className="flex items-center gap-2">
-                    {/* Unit selector inline */}
-                    <div className="flex gap-1">
+                    <span className="font-mono text-xs text-muted-foreground/70 tracking-wider">ПОЗИЦИИ</span>
+                    {isRecognizing && <span className="font-mono text-xs text-primary animate-pulse">РАСПОЗНАЮ...</span>}
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <div className="flex gap-0.5">
                       {(Object.keys(UNIT_LABELS) as Unit[]).map((u) => (
                         <button key={u} onClick={() => setUnit(u)}
-                          className={`px-2 py-0.5 font-mono text-xs border transition-all duration-150 ${unit === u ? 'border-primary bg-primary/10 text-primary' : 'border-border/30 text-muted-foreground/50 hover:border-primary/30'}`}>
+                          className={`px-1.5 py-0.5 font-mono text-xs border transition-all ${unit === u ? 'border-primary bg-primary/10 text-primary' : 'border-border/25 text-muted-foreground/50 hover:border-primary/30'}`}>
                           {u.toUpperCase()}
                         </button>
                       ))}
                     </div>
                     <button onClick={addEntry}
-                      className="flex items-center gap-1 font-mono text-xs text-primary/70 hover:text-primary border border-primary/30 hover:border-primary/60 px-2 py-0.5 transition-colors">
-                      <Icon name="Plus" size={11} />
-                      ADD
+                      className="flex items-center gap-1 font-mono text-xs text-primary/60 hover:text-primary border border-primary/25 hover:border-primary/50 px-1.5 py-0.5 transition-colors">
+                      <Icon name="Plus" size={10} />+
                     </button>
                   </div>
                 </div>
-
-                <div className="flex-1 overflow-auto p-2 space-y-1.5">
-                  {isRecognizing ? (
-                    <div className="h-full flex items-center justify-center">
-                      <div className="flex gap-1.5">
-                        {[0,1,2].map(i => (
-                          <div key={i} className="w-2 h-2 bg-primary/60 rounded-full animate-pulse" style={{ animationDelay: `${i * 0.2}s` }} />
-                        ))}
+                <div className="flex-1 overflow-auto p-1.5 space-y-1">
+                  {isRecognizing
+                    ? <div className="h-full flex items-center justify-center gap-1.5">
+                        {[0,1,2].map(i => <div key={i} className="w-2 h-2 bg-primary/60 rounded-full animate-pulse" style={{ animationDelay: `${i*0.2}s` }} />)}
                       </div>
-                    </div>
-                  ) : entries.map((entry, idx) => {
-                    const isActive = activeEntry === entry.id;
-                    const ew = parseFloat(entry.width) * UNIT_TO_MM[unit];
-                    const eh = parseFloat(entry.height) * UNIT_TO_MM[unit];
-                    const qty = parseInt(entry.qty) || 1;
-                    const entryValid = ew > 0 && eh > 0;
-                    const areaMm2 = ew * eh * qty;
-
-                    return (
-                      <div key={entry.id} onClick={() => setActiveEntry(entry.id)}
-                        className={`border p-2.5 cursor-pointer transition-all duration-150 ${isActive ? 'border-primary/60 bg-primary/5' : 'border-border/25 hover:border-border/50'}`}>
-                        <div className="flex items-center justify-between mb-2">
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono text-xs font-bold text-primary/80">#{idx + 1}</span>
-                            {entryValid && (
-                              <span className="font-mono text-xs text-muted-foreground/60">
-                                {(areaMm2 / 1_000_000).toFixed(4)} м²
-                              </span>
-                            )}
-                          </div>
-                          <button onClick={(e) => { e.stopPropagation(); removeEntry(entry.id); }}
-                            className="text-muted-foreground/25 hover:text-destructive transition-colors">
-                            <Icon name="X" size={13} />
-                          </button>
-                        </div>
-                        <div className="grid grid-cols-3 gap-1.5">
-                          {(['width','height','qty'] as const).map((field) => (
-                            <div key={field}>
-                              <label className="font-mono text-xs text-muted-foreground/40 block mb-0.5">
-                                {field === 'width' ? 'Ш' : field === 'height' ? 'В' : 'КОЛ'}
-                              </label>
-                              <input type="number" min={field === 'qty' ? '1' : undefined}
-                                className="w-full bg-muted/20 border border-border/25 px-2 py-1 font-mono text-sm text-foreground focus:outline-none focus:border-primary/50 transition-colors"
-                                value={entry[field]}
-                                onClick={(e) => e.stopPropagation()}
-                                onChange={(e) => updateEntry(entry.id, field, e.target.value)}
-                                placeholder={field === 'width' ? '753' : field === 'height' ? '497' : '1'}
-                              />
+                    : entries.map((entry, idx) => {
+                        const isActive = activeEntry === entry.id;
+                        const ew = parseFloat(entry.width) * UNIT_TO_MM[unit];
+                        const eh = parseFloat(entry.height) * UNIT_TO_MM[unit];
+                        const qty = parseInt(entry.qty) || 1;
+                        const areaMm2 = ew * eh * qty;
+                        return (
+                          <div key={entry.id} onClick={() => setActiveEntry(entry.id)}
+                            className={`border p-2 cursor-pointer transition-all duration-150 ${isActive ? 'border-primary/50 bg-primary/5' : 'border-border/20 hover:border-border/40'}`}>
+                            <div className="flex items-center justify-between mb-1.5">
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono text-xs font-bold" style={{ color: COLORS[idx % COLORS.length] }}>#{idx + 1}</span>
+                                {ew > 0 && eh > 0 && <span className="font-mono text-xs text-muted-foreground/50">{(areaMm2/1_000_000).toFixed(4)} м²</span>}
+                              </div>
+                              <button onClick={(e) => { e.stopPropagation(); removeEntry(entry.id); }}
+                                className="text-muted-foreground/25 hover:text-destructive transition-colors">
+                                <Icon name="X" size={12} />
+                              </button>
                             </div>
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  })}
+                            <div className="grid grid-cols-3 gap-1">
+                              {(['width','height','qty'] as const).map(field => (
+                                <div key={field}>
+                                  <label className="font-mono text-xs text-muted-foreground/35 block mb-0.5">
+                                    {field === 'width' ? 'ШИР' : field === 'height' ? 'ВЫС' : 'КОЛ'}
+                                  </label>
+                                  <input type="number" min={field === 'qty' ? '1' : undefined}
+                                    className="w-full bg-muted/15 border border-border/20 px-1.5 py-1 font-mono text-sm text-foreground focus:outline-none focus:border-primary/40 transition-colors"
+                                    value={entry[field]}
+                                    onClick={(e) => e.stopPropagation()}
+                                    onChange={(e) => updateEntry(entry.id, field, e.target.value)}
+                                    placeholder={field === 'width' ? '753' : field === 'height' ? '497' : '1'}
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })
+                  }
                 </div>
               </div>
 
-              {/* COL 3: Stats + actions */}
+              {/* Panel 3: Stats + Layout settings */}
               <div className="border border-border/40 flex flex-col overflow-hidden">
-                <div className="px-3 py-2 border-b border-border/30 shrink-0">
-                  <span className="font-mono text-xs text-muted-foreground tracking-wider">СВОДКА</span>
+                <div className="px-3 py-1.5 border-b border-border/30 shrink-0">
+                  <span className="font-mono text-xs text-muted-foreground/70 tracking-wider">ПАРАМЕТРЫ</span>
                 </div>
-                <div className="flex-1 p-3 flex flex-col gap-3">
+                <div className="flex-1 overflow-auto p-3 space-y-4">
+
                   {/* Stats */}
-                  <div className="space-y-2">
+                  <div className="space-y-1.5">
                     {[
                       { label: 'Позиций', value: String(validEntries.length) },
                       { label: 'Итого рамок', value: String(totalPieces) },
-                      { label: 'Общая площадь', value: totalAreaM2 > 0 ? `${totalAreaM2.toFixed(4)} м²` : '—' },
-                      { label: 'Площадь в мм²', value: totalAreaMm2 > 0 ? `${Math.round(totalAreaMm2).toLocaleString('ru')}` : '—' },
+                      { label: 'Площадь', value: totalAreaMm2 > 0 ? `${(totalAreaMm2/1_000_000).toFixed(4)} м²` : '—' },
                     ].map(({ label, value }) => (
-                      <div key={label} className="flex items-center justify-between py-1.5 border-b border-border/20">
-                        <span className="font-mono text-xs text-muted-foreground/60">{label}</span>
+                      <div key={label} className="flex items-center justify-between py-1 border-b border-border/15">
+                        <span className="font-mono text-xs text-muted-foreground/50">{label}</span>
                         <span className="font-mono text-sm text-primary/90 font-medium">{value}</span>
                       </div>
                     ))}
                   </div>
 
-                  {/* Per-entry area breakdown */}
+                  {/* Layout settings */}
+                  <div>
+                    <div className="font-mono text-xs text-muted-foreground/50 tracking-wider mb-2">РАСПОЛОЖЕНИЕ</div>
+                    <div className="space-y-2">
+                      <div>
+                        <label className="font-mono text-xs text-muted-foreground/40 block mb-1">ОТСТУП Г (мм)</label>
+                        <div className="flex items-center gap-1.5">
+                          <button onClick={() => setGap('gapX', String(Math.max(0, layout.gapX - 5)))} className="w-6 h-6 border border-border/30 text-muted-foreground hover:border-primary/40 font-mono text-xs flex items-center justify-center">−</button>
+                          <input type="number" min="0"
+                            className="flex-1 bg-muted/15 border border-border/20 px-2 py-1 font-mono text-sm text-foreground text-center focus:outline-none focus:border-primary/40"
+                            value={layout.gapX}
+                            onChange={(e) => setGap('gapX', e.target.value)} />
+                          <button onClick={() => setGap('gapX', String(layout.gapX + 5))} className="w-6 h-6 border border-border/30 text-muted-foreground hover:border-primary/40 font-mono text-xs flex items-center justify-center">+</button>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="font-mono text-xs text-muted-foreground/40 block mb-1">ОТСТУП В (мм)</label>
+                        <div className="flex items-center gap-1.5">
+                          <button onClick={() => setGap('gapY', String(Math.max(0, layout.gapY - 5)))} className="w-6 h-6 border border-border/30 text-muted-foreground hover:border-primary/40 font-mono text-xs flex items-center justify-center">−</button>
+                          <input type="number" min="0"
+                            className="flex-1 bg-muted/15 border border-border/20 px-2 py-1 font-mono text-sm text-foreground text-center focus:outline-none focus:border-primary/40"
+                            value={layout.gapY}
+                            onChange={(e) => setGap('gapY', e.target.value)} />
+                          <button onClick={() => setGap('gapY', String(layout.gapY + 5))} className="w-6 h-6 border border-border/30 text-muted-foreground hover:border-primary/40 font-mono text-xs flex items-center justify-center">+</button>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="font-mono text-xs text-muted-foreground/40 block mb-1">КОЛОНОК В РЯД <span className="text-muted-foreground/30">(0 = авто)</span></label>
+                        <div className="flex items-center gap-1.5">
+                          <button onClick={() => setCols(String(Math.max(0, layout.cols - 1)))} className="w-6 h-6 border border-border/30 text-muted-foreground hover:border-primary/40 font-mono text-xs flex items-center justify-center">−</button>
+                          <input type="number" min="0"
+                            className="flex-1 bg-muted/15 border border-border/20 px-2 py-1 font-mono text-sm text-foreground text-center focus:outline-none focus:border-primary/40"
+                            value={layout.cols}
+                            onChange={(e) => setCols(e.target.value)} />
+                          <button onClick={() => setCols(String(layout.cols + 1))} className="w-6 h-6 border border-border/30 text-muted-foreground hover:border-primary/40 font-mono text-xs flex items-center justify-center">+</button>
+                        </div>
+                        <div className="mt-1.5 flex gap-1 flex-wrap">
+                          {[0,2,3,4,5].map(n => (
+                            <button key={n} onClick={() => setCols(String(n))}
+                              className={`px-2 py-0.5 font-mono text-xs border transition-all ${layout.cols === n ? 'border-primary bg-primary/10 text-primary' : 'border-border/25 text-muted-foreground/40 hover:border-primary/30'}`}>
+                              {n === 0 ? 'авто' : `${n}`}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Per-entry area */}
                   {validEntries.length > 0 && (
-                    <div className="flex-1 overflow-auto">
-                      <div className="font-mono text-xs text-muted-foreground/50 mb-1.5 tracking-wider">ПЛОЩАДЬ ПО ПОЗИЦИЯМ</div>
-                      <div className="space-y-1">
+                    <div>
+                      <div className="font-mono text-xs text-muted-foreground/40 tracking-wider mb-1.5">ПО ПОЗИЦИЯМ</div>
+                      <div className="space-y-0.5">
                         {validEntries.map((e, idx) => {
                           const w = parseFloat(e.width) * UNIT_TO_MM[unit];
                           const h = parseFloat(e.height) * UNIT_TO_MM[unit];
                           const qty = parseInt(e.qty) || 1;
-                          const area = (w * h * qty) / 1_000_000;
                           return (
                             <div key={e.id} className="flex items-center justify-between">
-                              <span className="font-mono text-xs text-muted-foreground/50">#{idx + 1} {e.width}×{e.height} ×{qty}</span>
-                              <span className="font-mono text-xs text-foreground/70">{area.toFixed(4)} м²</span>
+                              <span className="font-mono text-xs" style={{ color: COLORS[idx % COLORS.length] + 'aa' }}>
+                                #{idx+1} {e.width}×{e.height}×{qty}
+                              </span>
+                              <span className="font-mono text-xs text-foreground/50">
+                                {((w * h * qty) / 1_000_000).toFixed(4)}м²
+                              </span>
                             </div>
                           );
                         })}
@@ -531,51 +614,43 @@ export default function Index() {
                   )}
                 </div>
 
-                <div className="p-3 border-t border-border/30 space-y-2 shrink-0">
-                  <button onClick={() => setStep(1)}
-                    className="w-full py-2 border border-border/40 text-muted-foreground hover:border-primary/30 font-mono text-xs tracking-widest transition-all">
-                    ← ЗАГРУЗИТЬ НОВОЕ
-                  </button>
-                  <button onClick={handleGenerateAndPreview} disabled={validEntries.length === 0}
-                    className="w-full py-2.5 bg-primary text-primary-foreground font-mono text-xs tracking-widest hover:bg-primary/90 transition-all disabled:opacity-30 disabled:cursor-not-allowed glow">
-                    ОБНОВИТЬ ЧЕРТЁЖ ↓
+                <div className="p-2 border-t border-border/25 shrink-0">
+                  <button onClick={() => { setStep(1); setImagePreview(null); setRawText(''); setEntries([]); }}
+                    className="w-full py-1.5 border border-border/30 text-muted-foreground/60 hover:border-primary/30 font-mono text-xs tracking-widest transition-all">
+                    ← НОВОЕ ИЗОБРАЖЕНИЕ
                   </button>
                 </div>
               </div>
             </div>
 
-            {/* Bottom: DXF Canvas preview */}
-            <div className="border border-border/40 flex flex-col flex-1 overflow-hidden min-h-0">
-              <div className="px-3 py-2 border-b border-border/30 flex items-center justify-between shrink-0">
+            {/* Bottom: canvas */}
+            <div className="flex-1 border border-border/40 m-3 mt-3 overflow-hidden flex flex-col min-h-0">
+              <div className="px-3 py-1.5 border-b border-border/30 flex items-center justify-between shrink-0">
                 <div className="flex items-center gap-2">
                   <div className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse" />
-                  <span className="font-mono text-xs text-muted-foreground tracking-wider">ЧЕРТЁЖ DXF — ПРЕДПРОСМОТР</span>
+                  <span className="font-mono text-xs text-muted-foreground/70 tracking-wider">ЧЕРТЁЖ — ПРЕДПРОСМОТР</span>
                   {validEntries.length > 0 && (
-                    <span className="font-mono text-xs text-primary/50">
-                      {totalPieces} рамок · {totalAreaM2.toFixed(4)} м²
+                    <span className="font-mono text-xs text-muted-foreground/40">
+                      {totalPieces} рамок · {layout.cols > 0 ? `${layout.cols} кол.` : 'авто'} · отступ {layout.gapX}×{layout.gapY}мм
                     </span>
                   )}
                 </div>
-                <button
-                  onClick={handleDownload}
-                  disabled={!dxfContent}
-                  className="flex items-center gap-2 px-3 py-1.5 bg-primary text-primary-foreground font-mono text-xs tracking-widest hover:bg-primary/90 transition-all disabled:opacity-30 disabled:cursor-not-allowed glow"
-                >
-                  <Icon name="Download" size={13} />
+                <button onClick={handleDownload} disabled={!dxfContent}
+                  className="flex items-center gap-2 px-3 py-1 bg-primary text-primary-foreground font-mono text-xs tracking-widest hover:bg-primary/90 transition-all disabled:opacity-30 glow">
+                  <Icon name="Download" size={12} />
                   СКАЧАТЬ DXF
                 </button>
               </div>
               <div className="flex-1 overflow-auto">
-                {validEntries.length > 0 ? (
-                  <DXFCanvas entries={entries} unit={unit} />
-                ) : (
-                  <div className="h-full flex items-center justify-center">
-                    <div className="text-center">
-                      <Icon name="LayoutTemplate" size={32} className="text-muted-foreground/20 mx-auto mb-2" />
-                      <span className="font-mono text-xs text-muted-foreground/30">ДОБАВЬТЕ ПОЗИЦИИ ЧТОБЫ УВИДЕТЬ ЧЕРТЁЖ</span>
+                {validEntries.length > 0
+                  ? <DXFCanvas entries={entries} unit={unit} layout={layout} />
+                  : <div className="h-full flex items-center justify-center">
+                      <div className="text-center opacity-30">
+                        <Icon name="LayoutTemplate" size={28} className="text-muted-foreground mx-auto mb-2" />
+                        <span className="font-mono text-xs text-muted-foreground">ДОБАВЬТЕ ПОЗИЦИИ</span>
+                      </div>
                     </div>
-                  </div>
-                )}
+                }
               </div>
             </div>
 
@@ -584,8 +659,8 @@ export default function Index() {
       </main>
 
       <footer className="border-t border-border/30 px-6 py-2 flex items-center justify-between shrink-0">
-        <span className="font-mono text-xs text-muted-foreground/40">DXF GENERATOR v1.1</span>
-        <span className="font-mono text-xs text-muted-foreground/40">AutoCAD R2000 · AC1015</span>
+        <span className="font-mono text-xs text-muted-foreground/30">DXF GENERATOR v1.2</span>
+        <span className="font-mono text-xs text-muted-foreground/30">AutoCAD R2000 · AC1015</span>
       </footer>
     </div>
   );
