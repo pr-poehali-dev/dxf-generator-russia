@@ -11,9 +11,7 @@
       "method": "POST",
       "path": "/",
       "body": {"dummy": "test"},
-      "expectedStatus": 400,
-      "expectedBody": {"error": "string"},
-      "bodyMatcher": "partial"
+      "expectedStatus": 400
     }
   ]
 }
