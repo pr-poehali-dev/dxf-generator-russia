@@ -26,10 +26,16 @@ const UNIT_TO_MM: Record<Unit, number> = { mm: 1, cm: 10, inch: 25.4, px: 0.2645
 
 function parseAllDimensions(text: string): DimEntry[] {
   const results: DimEntry[] = [];
-  const linePattern = /(\d+[.,]?\d*)\s*[xхXХ×]\s*(\d+[.,]?\d*)(?:\s*[-—–]?\s*(\d+)\s*(?:шт|pcs|pc|штук|штуки)?)?/gi;
+  // Разделители: x/х/X/Х/×/*/на/by, пробел между цифрами тоже считаем
+  const linePattern = /(\d+[.,]?\d*)\s*(?:[xхXХ×*]|на|by)\s*(\d+[.,]?\d*)(?:\s*[-—–x]?\s*(\d+)\s*(?:шт\.?|pcs\.?|pc\.?|штук|штуки|шт|ед\.?))?/gi;
   let match, idx = 0;
   while ((match = linePattern.exec(text)) !== null) {
-    results.push({ id: String(idx++), width: match[1].replace(',', '.'), height: match[2].replace(',', '.'), qty: match[3] || '1' });
+    const w = match[1].replace(',', '.');
+    const h = match[2].replace(',', '.');
+    // Фильтруем мусор: оба числа должны быть > 0 и не слишком маленькими
+    if (parseFloat(w) > 0 && parseFloat(h) > 0) {
+      results.push({ id: String(idx++), width: w, height: h, qty: match[3] || '1' });
+    }
   }
   return results;
 }
@@ -459,8 +465,19 @@ export default function Index() {
                   }
                 </div>
                 {rawText && (
-                  <div className="border-t border-border/25 px-2 py-1.5 max-h-16 overflow-auto shrink-0">
-                    <p className="font-mono text-xs text-foreground/35 whitespace-pre-wrap leading-relaxed">{rawText}</p>
+                  <div className="border-t border-border/25 px-2 py-1.5 max-h-24 overflow-auto shrink-0">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-mono text-xs text-muted-foreground/40">OCR ТЕКСТ</span>
+                      {validEntries.length === 0 && (
+                        <span className="font-mono text-xs text-yellow-500/70">размеры не найдены — введи вручную</span>
+                      )}
+                    </div>
+                    <p className="font-mono text-xs text-foreground/40 whitespace-pre-wrap leading-relaxed">{rawText}</p>
+                  </div>
+                )}
+                {!rawText && !isRecognizing && imagePreview && (
+                  <div className="border-t border-border/25 px-2 py-1.5 shrink-0">
+                    <span className="font-mono text-xs text-yellow-500/70">OCR не нашёл текст — введи размеры вручную</span>
                   </div>
                 )}
               </div>
