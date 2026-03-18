@@ -303,6 +303,7 @@ export default function Index() {
   const [dxfContent, setDxfContent] = useState('');
   const [activeEntry, setActiveEntry] = useState<string | null>(null);
   const [layout, setLayout] = useState<LayoutSettings>({ gapX: 10, gapY: 10, cols: 0 });
+  const [ocrError, setOcrError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef2 = useRef<HTMLInputElement>(null);
 
@@ -314,20 +315,31 @@ export default function Index() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ image: imageBase64 })
     });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `Ошибка сервера ${resp.status}`);
+    }
     const data = await resp.json();
     return data.text || '';
   };
 
+  const applyOCRResult = (text: string) => {
+    setRawText(text.trim());
+    setOcrError('');
+    const parsed = parseAllDimensions(text);
+    setEntries(parsed.length > 0 ? parsed : [{ id: '0', width: '', height: '', qty: '1' }]);
+    if (parsed.length > 0) setActiveEntry(parsed[0].id);
+  };
+
   const recognizeImage = async (imageUrl: string) => {
     setIsRecognizing(true);
+    setOcrError('');
     try {
       const text = await runOCR(imageUrl);
-      setRawText(text.trim());
-      const parsed = parseAllDimensions(text);
-      setEntries(parsed.length > 0 ? parsed : [{ id: '0', width: '', height: '', qty: '1' }]);
-      if (parsed.length > 0) setActiveEntry(parsed[0].id);
-    } catch {
+      applyOCRResult(text);
+    } catch (e: unknown) {
       setRawText('');
+      setOcrError(e instanceof Error ? e.message : 'Ошибка распознавания');
       setEntries([{ id: '0', width: '', height: '', qty: '1' }]);
     }
     setIsRecognizing(false);
@@ -341,14 +353,13 @@ export default function Index() {
       setImagePreview(url);
       setStep(2);
       setIsRecognizing(true);
+      setOcrError('');
       try {
         const text = await runOCR(url);
-        setRawText(text.trim());
-        const parsed = parseAllDimensions(text);
-        setEntries(parsed.length > 0 ? parsed : [{ id: '0', width: '', height: '', qty: '1' }]);
-        if (parsed.length > 0) setActiveEntry(parsed[0].id);
-      } catch {
+        applyOCRResult(text);
+      } catch (e: unknown) {
         setRawText('');
+        setOcrError(e instanceof Error ? e.message : 'Ошибка распознавания');
         setEntries([{ id: '0', width: '', height: '', qty: '1' }]);
       }
       setIsRecognizing(false);
@@ -497,20 +508,14 @@ export default function Index() {
                       </div>
                   }
                 </div>
-                {rawText && (
-                  <div className="border-t border-border/25 px-2 py-1.5 max-h-24 overflow-auto shrink-0">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="font-mono text-xs text-muted-foreground/40">OCR ТЕКСТ</span>
-                      {validEntries.length === 0 && (
-                        <span className="font-mono text-xs text-yellow-500/70">размеры не найдены — введи вручную</span>
-                      )}
-                    </div>
-                    <p className="font-mono text-xs text-foreground/40 whitespace-pre-wrap leading-relaxed">{rawText}</p>
+                {ocrError && (
+                  <div className="border-t border-border/25 px-2 py-1.5 shrink-0">
+                    <span className="font-mono text-xs text-red-400/80">{ocrError}</span>
                   </div>
                 )}
-                {!rawText && !isRecognizing && imagePreview && (
-                  <div className="border-t border-border/25 px-2 py-1.5 shrink-0">
-                    <span className="font-mono text-xs text-yellow-500/70">OCR не нашёл текст — введи размеры вручную</span>
+                {rawText && !ocrError && (
+                  <div className="border-t border-border/25 px-2 py-1.5 max-h-24 overflow-auto shrink-0">
+                    <p className="font-mono text-xs text-foreground/40 whitespace-pre-wrap leading-relaxed">{rawText}</p>
                   </div>
                 )}
               </div>
