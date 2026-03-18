@@ -294,11 +294,25 @@ export default function Index() {
   const handleFile = useCallback((file: File) => {
     if (!file.type.startsWith('image/')) return;
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       const url = e.target?.result as string;
       setImagePreview(url);
       setStep(2);
-      recognizeImage(url);
+      setIsRecognizing(true);
+      try {
+        const { createWorker } = await import('tesseract.js');
+        const worker = await createWorker('rus+eng');
+        const { data: { text } } = await worker.recognize(url);
+        await worker.terminate();
+        setRawText(text.trim());
+        const parsed = parseAllDimensions(text);
+        setEntries(parsed.length > 0 ? parsed : [{ id: '0', width: '', height: '', qty: '1' }]);
+        if (parsed.length > 0) setActiveEntry(parsed[0].id);
+      } catch {
+        setRawText('');
+        setEntries([{ id: '0', width: '', height: '', qty: '1' }]);
+      }
+      setIsRecognizing(false);
     };
     reader.readAsDataURL(file);
   }, []);
