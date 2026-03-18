@@ -1,5 +1,5 @@
 import os
-import json
+import json  # noqa
 import base64
 import subprocess
 import tempfile
