@@ -26,17 +26,44 @@ const UNIT_TO_MM: Record<Unit, number> = { mm: 1, cm: 10, inch: 25.4, px: 0.2645
 
 function parseAllDimensions(text: string): DimEntry[] {
   const results: DimEntry[] = [];
-  // Разделители: x/х/X/Х/×/*/на/by, пробел между цифрами тоже считаем
-  const linePattern = /(\d+[.,]?\d*)\s*(?:[xхXХ×*]|на|by)\s*(\d+[.,]?\d*)(?:\s*[-—–x]?\s*(\d+)\s*(?:шт\.?|pcs\.?|pc\.?|штук|штуки|шт|ед\.?))?/gi;
-  let match, idx = 0;
-  while ((match = linePattern.exec(text)) !== null) {
-    const w = match[1].replace(',', '.');
-    const h = match[2].replace(',', '.');
-    // Фильтруем мусор: оба числа должны быть > 0 и не слишком маленькими
-    if (parseFloat(w) > 0 && parseFloat(h) > 0) {
-      results.push({ id: String(idx++), width: w, height: h, qty: match[3] || '1' });
+  // Парсим построчно для лучшего качества
+  const lines = text.split(/[\n\r]+/);
+  let idx = 0;
+
+  // Паттерн: 997 × 347 — 6 шт  (или x/х/X/×/*, тире/—/–, кол-во опционально)
+  // Группа 1: ширина, Группа 2: высота, Группа 3: количество (опционально)
+  const linePattern = /(\d{2,5}[.,]?\d*)\s*[xхXХ×*]\s*(\d{2,5}[.,]?\d*)(?:\s*[-—–=]\s*(\d+)\s*(?:шт\.?|pcs\.?|pc\.?|штук|штуки|ед\.?|шт)?)?/i;
+
+  for (const line of lines) {
+    const match = linePattern.exec(line);
+    if (match) {
+      const w = match[1].replace(',', '.');
+      const h = match[2].replace(',', '.');
+      if (parseFloat(w) > 0 && parseFloat(h) > 0) {
+        // Ищем количество отдельно в строке если не нашли в паттерне
+        let qty = match[3] || '';
+        if (!qty) {
+          const qtyMatch = line.match(/[-—–=]\s*(\d+)\s*(?:шт\.?|pcs\.?|pc\.?|штук|штуки|ед\.?)?/i);
+          if (qtyMatch) qty = qtyMatch[1];
+        }
+        results.push({ id: String(idx++), width: w, height: h, qty: qty || '1' });
+      }
     }
   }
+
+  // Fallback: если построчный не дал результатов — весь текст одним регекспом
+  if (results.length === 0) {
+    const globalPattern = /(\d{2,5}[.,]?\d*)\s*[xхXХ×*]\s*(\d{2,5}[.,]?\d*)(?:\s*[-—–]?\s*(\d+)\s*(?:шт\.?|pcs\.?|pc\.?|штук|штуки|шт|ед\.?))?/gi;
+    let m;
+    while ((m = globalPattern.exec(text)) !== null) {
+      const w = m[1].replace(',', '.');
+      const h = m[2].replace(',', '.');
+      if (parseFloat(w) > 0 && parseFloat(h) > 0) {
+        results.push({ id: String(idx++), width: w, height: h, qty: m[3] || '1' });
+      }
+    }
+  }
+
   return results;
 }
 
@@ -279,13 +306,22 @@ export default function Index() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef2 = useRef<HTMLInputElement>(null);
 
+  const OCR_URL = 'https://functions.poehali.dev/33370e84-0eb8-4c96-b594-e0c1681e8dca';
+
+  const runOCR = async (imageBase64: string): Promise<string> => {
+    const resp = await fetch(OCR_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: imageBase64 })
+    });
+    const data = await resp.json();
+    return data.text || '';
+  };
+
   const recognizeImage = async (imageUrl: string) => {
     setIsRecognizing(true);
     try {
-      const { createWorker } = await import('tesseract.js');
-      const worker = await createWorker('rus+eng');
-      const { data: { text } } = await worker.recognize(imageUrl);
-      await worker.terminate();
+      const text = await runOCR(imageUrl);
       setRawText(text.trim());
       const parsed = parseAllDimensions(text);
       setEntries(parsed.length > 0 ? parsed : [{ id: '0', width: '', height: '', qty: '1' }]);
@@ -306,10 +342,7 @@ export default function Index() {
       setStep(2);
       setIsRecognizing(true);
       try {
-        const { createWorker } = await import('tesseract.js');
-        const worker = await createWorker('rus+eng');
-        const { data: { text } } = await worker.recognize(url);
-        await worker.terminate();
+        const text = await runOCR(url);
         setRawText(text.trim());
         const parsed = parseAllDimensions(text);
         setEntries(parsed.length > 0 ? parsed : [{ id: '0', width: '', height: '', qty: '1' }]);
